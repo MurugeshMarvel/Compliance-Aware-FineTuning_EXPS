@@ -1,0 +1,29 @@
+# ── Keep private material out of the public repo ─────────────────────────────
+# The unpublished position paper. Do not commit this.
+caft_exp_scripts/docs/LLM Position paper.md
+# Speaker's private run-sheet and the deck.
+SPEAKER_NOTES.md
+presentation/
+reference paper/
+# Superseded result files kept only for provenance.
+caft_exp_scripts/eval/results/*_old.json
+caft_exp_scripts/eval/results_b4_utility.zip
+
+# ── Large or regenerable ─────────────────────────────────────────────────────
+# The 52k task dataset is pulled from the Hub at runtime, not committed.
+data/
+# Trained LoRA adapters and charts.
+outputs/
+
+# ── Environments and junk ────────────────────────────────────────────────────
+caft/
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.DS_Store
+.env
+*.log
+zzz_test

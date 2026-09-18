@@ -1,0 +1,12 @@
+# Local install:  pip install -r requirements.txt
+# On Colab you do not need this — the setup cell installs these for you.
+transformers>=4.52
+peft>=0.11
+datasets
+pyarrow
+accelerate
+matplotlib
+pandas
+python-dotenv
+huggingface_hub
+torch
