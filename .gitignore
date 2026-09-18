@@ -1,16 +1,21 @@
-# ── Keep private material out of the public repo ─────────────────────────────
-# The unpublished position paper. Do not commit this.
-caft_exp_scripts/docs/LLM Position paper.md
-# Speaker's private run-sheet and the deck.
+# ── The experiment tree is not part of the public repo ───────────────────────
+# The seven data files the notebooks need now live on the Hugging Face Hub
+# (see DATA_REPO in caft_colab.py, and upload_hf_data.py which publishes them).
+# The two training scripts are kept at the repo root as provenance; everything
+# else in here is private working material — including the unpublished position
+# paper in docs/ and a .env holding API keys.
+caft_exp_scripts/
+reference/
+
+# ── Other private material ───────────────────────────────────────────────────
+# Speaker's private run-sheet, the deck, and the source papers.
 SPEAKER_NOTES.md
 presentation/
 reference paper/
-# Superseded result files kept only for provenance.
-caft_exp_scripts/eval/results/*_old.json
-caft_exp_scripts/eval/results_b4_utility.zip
 
 # ── Large or regenerable ─────────────────────────────────────────────────────
 # The 52k task dataset is pulled from the Hub at runtime, not committed.
+# An offline copy of the study data may also be dropped here; still not committed.
 data/
 # Trained LoRA adapters and charts.
 outputs/
@@ -26,4 +31,4 @@ __pycache__/
 .DS_Store
 .env
 *.log
-zzz_test
+upload_hf_data.py

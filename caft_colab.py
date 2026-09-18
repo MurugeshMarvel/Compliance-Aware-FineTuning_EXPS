@@ -10,7 +10,7 @@ repo if it is not already on disk and then calls:
 `setup()` does five things, in order, and prints a status line for each:
 
   1. installs the Python dependencies (Colab only — a local env is left alone)
-  2. finds PROJECT_ROOT and checks the data files that ship with the repo
+  2. downloads the study data from the Hugging Face Hub and checks it is complete
   3. finds a Hugging Face token: Colab secret -> env var -> .env -> prompt
   4. checks whether you actually have access to gated MedGemma, and falls back
      to a small ungated model if you do not, so the notebook still runs
@@ -18,7 +18,7 @@ repo if it is not already on disk and then calls:
 
 It returns a plain object whose attributes the notebooks use directly:
 
-    env.PROJECT_ROOT  env.SCRIPTS  env.ALIGN_JSON  env.AUDIT_JSON  env.RESULTS
+    env.PROJECT_ROOT  env.DATA_DIR  env.ALIGN_JSON  env.AUDIT_JSON  env.RESULTS
     env.MODEL_ID      env.HF_TOKEN  env.IS_FALLBACK
     env.DEVICE        env.DTYPE     env.IN_COLAB
 
@@ -47,6 +47,35 @@ MEDGEMMA_ID = "google/medgemma-1.5-4b-it"
 # the numbers are not the ones in the talk.
 FALLBACK_ID = "Qwen/Qwen2.5-0.5B-Instruct"
 
+# ── Where the study data lives ────────────────────────────────────────────────
+# A public, ungated dataset repo on the Hub holding the seven files the
+# notebooks read. Keeping it off GitHub means the code repo stays small and the
+# data has one home, versioned independently of the notebooks.
+#
+#   alignment_data.json              D_A  — 1,475 prohibited-prompt pairs
+#   audit_data.json                  D_R  — 72 held-out adversarial probes
+#   results/base_responses.json      pre-computed run output, base model
+#   results/sft_responses.json       ..., standard SFT
+#   results/caft_responses.json      ..., CAFT
+#   results/judge_scores.json        the 0-5 regulatory rubric scores
+#   results/utility_judge_summary.json   task-quality check, n=10
+#
+# Populate it with upload_hf_data.py. Nothing here is gated, so notebooks 1
+# and 4 still need no token at all.
+DATA_REPO = "murugeshmarvel/caft-compliance-data"
+
+# The exact set setup() insists on. If the dataset repo is missing any of
+# these, it is better to say so plainly than to fail three cells later.
+REQUIRED_FILES = [
+    "alignment_data.json",
+    "audit_data.json",
+    "results/base_responses.json",
+    "results/sft_responses.json",
+    "results/caft_responses.json",
+    "results/judge_scores.json",
+    "results/utility_judge_summary.json",
+]
+
 REQUIREMENTS = [
     "transformers>=4.52",
     "peft>=0.11",
@@ -56,6 +85,7 @@ REQUIREMENTS = [
     "matplotlib",
     "pandas",
     "python-dotenv",
+    "huggingface_hub",
 ]
 
 _OK, _WARN, _BAD = "  ok ", " note", " FAIL"
@@ -75,14 +105,59 @@ def install_requirements(in_colab: bool, quiet: bool = True) -> None:
     _line(_OK, "dependencies", "installed for Colab")
 
 
-# ── 2. project root ───────────────────────────────────────────────────────────
+# ── 2. project root and study data ────────────────────────────────────────────
 def find_project_root(start: Path | None = None) -> Path | None:
-    """Walk up from `start` looking for the folder that holds caft_exp_scripts."""
+    """Walk up from `start` looking for the folder that holds caft_colab.py."""
     start = Path(start or Path.cwd()).resolve()
     for p in [start, *start.parents]:
-        if (p / "caft_exp_scripts").is_dir():
+        if (p / "caft_colab.py").exists():
             return p
     return None
+
+
+def fetch_study_data(
+    repo_id: str = DATA_REPO,
+    token: str | None = None,
+    local_dir: Path | str | None = None,
+) -> tuple[Path, str]:
+    """Get the seven data files. Returns (folder, how-we-got-it).
+
+    Local first: if `local_dir` already holds alignment_data.json, use it and
+    touch the network not at all. That is the offline escape hatch — drop the
+    files in `<repo>/data/` and the notebooks stop caring about the wifi.
+
+    Otherwise pull the whole dataset repo in one `snapshot_download`. It is
+    about 2 MB, public and ungated, and cached for the rest of the session.
+    """
+    if local_dir:
+        local_dir = Path(local_dir)
+        if (local_dir / "alignment_data.json").exists():
+            return local_dir, f"local copy at {local_dir.name}/"
+
+    try:
+        from huggingface_hub import snapshot_download
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(
+            "huggingface_hub is not installed, so the study data cannot be "
+            "downloaded. Run:  pip install huggingface_hub"
+        ) from e
+
+    try:
+        path = snapshot_download(repo_id=repo_id, repo_type="dataset", token=token)
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(
+            f"Could not download the study data from '{repo_id}'.\n"
+            f"  {type(e).__name__}: {str(e)[:160]}\n\n"
+            "  This dataset is public and ungated, so a failure here is almost\n"
+            "  always one of three things:\n"
+            "    - no internet on this runtime (Colab normally has it)\n"
+            "    - the dataset repo does not exist yet — run upload_hf_data.py\n"
+            "    - the repo is set to private on the Hub; make it public, or\n"
+            "      pass a token that can read it\n\n"
+            "  Fully offline alternative: put the seven files in <repo>/data/\n"
+            "  and setup() will use those instead, without any network."
+        ) from e
+    return Path(path), f"Hub: {repo_id}"
 
 
 # ── 3. Hugging Face token ─────────────────────────────────────────────────────
@@ -198,17 +273,27 @@ def setup(
     if root is None:
         raise RuntimeError(
             "Could not find the project. Expected a folder containing "
-            "'caft_exp_scripts'. On Colab, run the bootstrap cell that clones "
+            "'caft_colab.py'. On Colab, run the bootstrap cell that clones "
             "the repo before calling setup()."
         )
-    scripts = root / "caft_exp_scripts"
-    align = scripts / "alignment" / "alignment_data.json"
-    audit = scripts / "audit" / "audit_data.json"
-    results = scripts / "eval" / "results"
-
     _line(_OK, "project root", str(root))
-    for label, p in [("alignment set", align), ("audit set", audit), ("results", results)]:
-        _line(_OK if p.exists() else _BAD, label, str(p.relative_to(root)) if p.exists() else f"MISSING {p}")
+
+    # study data — Hub, or a local copy in <repo>/data/ if one is there
+    data_dir, source = fetch_study_data(DATA_REPO, token=None, local_dir=root / "data")
+    _line(_OK, "study data", source)
+
+    missing = [f for f in REQUIRED_FILES if not (data_dir / f).exists()]
+    if missing:
+        raise RuntimeError(
+            f"The study data at {data_dir} is incomplete. Missing:\n"
+            + "".join(f"    {m}\n" for m in missing)
+            + "\n  Re-run upload_hf_data.py to repopulate the dataset repo."
+        )
+    _line(_OK, "data files", f"all {len(REQUIRED_FILES)} present")
+
+    align = data_dir / "alignment_data.json"
+    audit = data_dir / "audit_data.json"
+    results = data_dir / "results"
 
     # device
     device, dtype, gpu_name = pick_device()
@@ -253,7 +338,7 @@ def setup(
 
     return SimpleNamespace(
         PROJECT_ROOT=root,
-        SCRIPTS=scripts,
+        DATA_DIR=data_dir,
         ALIGN_JSON=align,
         AUDIT_JSON=audit,
         RESULTS=results,
