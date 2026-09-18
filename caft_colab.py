@@ -96,13 +96,50 @@ def _line(status: str, label: str, detail: str = "") -> None:
 
 
 # ── 1. dependencies ───────────────────────────────────────────────────────────
+def _clear_stale_torchao() -> str | None:
+    """Remove Colab's preinstalled torchao if peft would reject it.
+
+    peft calls is_torchao_available() from get_peft_model(). That function does
+    not fail soft: if torchao is installed but older than peft's minimum, it
+    raises ImportError and the LoRA cell dies. Colab currently ships torchao
+    0.10.0 while recent peft wants >= 0.16.0, so every runtime hits this.
+
+    Nothing here uses torchao — it is a quantisation library and we train in
+    plain fp16 — so the safe fix is to remove it rather than chase a version
+    that also has to match the runtime's torch. With the package gone,
+    is_torchao_available() finds no module and returns False, which is the
+    path peft is designed to take.
+    """
+    try:
+        from importlib.metadata import version
+        installed = version("torchao")
+    except Exception:  # noqa: BLE001
+        return None                      # not installed — nothing to do
+
+    from packaging.version import parse
+    if parse(installed) >= parse("0.16.0"):
+        return None                      # new enough for peft, leave it alone
+
+    subprocess.run([sys.executable, "-m", "pip", "uninstall", "-y", "-q", "torchao"],
+                   check=False)
+    import importlib
+    importlib.invalidate_caches()        # so find_spec stops seeing the old dir
+    return installed
+
+
 def install_requirements(in_colab: bool, quiet: bool = True) -> None:
     if not in_colab:
         _line(_OK, "dependencies", "local environment — nothing installed")
         return
     cmd = [sys.executable, "-m", "pip", "install", "-q", *REQUIREMENTS]
     subprocess.run(cmd, check=False)
-    _line(_OK, "dependencies", "installed for Colab")
+
+    removed = _clear_stale_torchao()
+    if removed:
+        _line(_OK, "dependencies", f"installed for Colab (removed torchao {removed} "
+                                   f"— too old for peft, and unused here)")
+    else:
+        _line(_OK, "dependencies", "installed for Colab")
 
 
 # ── 2. project root and study data ────────────────────────────────────────────
