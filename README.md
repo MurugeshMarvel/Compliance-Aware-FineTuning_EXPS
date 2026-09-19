@@ -71,8 +71,18 @@ readable file, [`caft_colab.py`](caft_colab.py), and it does five things:
 3. finds a Hugging Face token: Colab secret → environment variable → `.env` → prompt
 4. checks whether your token can actually reach gated MedGemma, and falls back
    to the ungated model if not
-5. picks a device and a dtype that will not blow up — bfloat16 on Ampere and
-   newer, float16 on a T4, float32 on CPU
+5. picks a device and a dtype that will not blow up — bfloat16 on any GPU that
+   can execute it, float32 on CPU
+
+On that last point: MedGemma is built on Gemma-3, whose residual stream reaches
+about 280,000 on a clinical prompt. float16 stops at 65,504, so in float16 the
+residual becomes `inf` at layer 5 of 34, the next RMSNorm turns it into `nan`,
+and every training loss is `nan` from step 1. Keeping the LoRA adapters, the
+norm layers and the output head in float32 does not fix it — the residual
+stream itself is what overflows. bfloat16 has the same 16 bits and float32's
+exponent range, so `setup()` asks for it everywhere and refuses to fall back to
+float16. A free Colab T4 has no bfloat16 tensor cores but still runs bfloat16
+correctly, just without that acceleration.
 
 It prints a status line for each step, so when something is wrong you can see
 which of the five it was.
