@@ -105,7 +105,7 @@ def _clear_stale_torchao() -> str | None:
     0.10.0 while recent peft wants >= 0.16.0, so every runtime hits this.
 
     Nothing here uses torchao — it is a quantisation library and we train in
-    plain fp16 — so the safe fix is to remove it rather than chase a version
+    plain bfloat16 — so the safe fix is to remove it rather than chase a version
     that also has to match the runtime's torch. With the package gone,
     is_torchao_available() finds no module and returns False, which is the
     path peft is designed to take.
@@ -263,8 +263,42 @@ def check_model_access(model_id: str, token: str | None) -> tuple[bool, str]:
 
 
 # ── 5. device and dtype ───────────────────────────────────────────────────────
-def pick_device():
-    """Return (device, dtype, human-readable name). Safe if torch is absent."""
+def _bf16_matmul_works(torch) -> bool:
+    """Can this CUDA device actually multiply two bfloat16 matrices?
+
+    bfloat16 *tensor cores* arrived with Ampere (compute capability 8.0), so
+    the usual rule of thumb is "a T4 cannot do bf16". That rule is about speed,
+    not about whether the maths runs at all — PyTorch will still execute a bf16
+    matmul on a Turing card, just without tensor-core acceleration. Whether the
+    installed cuBLAS accepts it varies by version, so stop guessing and try it.
+    """
+    try:
+        a = torch.randn(256, 256, device="cuda", dtype=torch.bfloat16)
+        return bool(torch.isfinite(a @ a).all().item())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def pick_device(strict: bool = True):
+    """Return (device, dtype, human-readable name). Safe if torch is absent.
+
+    With strict=False a GPU that cannot do bfloat16 is reported rather than
+    refused, so the notebooks that only read data still run on it.
+
+    Gemma-3 — and so MedGemma, which is built on it — cannot be trained in
+    float16. Its residual stream grows layer by layer and, measured on this
+    exact model with a clinical prompt, peaks at about 280,000. float16 stops
+    at 65,504, so the residual becomes inf partway up the stack (layer 5 of
+    34), the next RMSNorm turns that inf into nan, and every loss from step 1
+    onwards is nan. This is a property of the model's activations rather than
+    of any particular GPU, and it cannot be patched by keeping the adapters,
+    the norm layers or the output head in float32 — the residual stream itself
+    is the thing that overflows, and it is in the model's dtype.
+
+    So: bfloat16 wherever it is available. bfloat16 has the same 16 bits as
+    float16 but float32's exponent range, which covers 280,000 with room to
+    spare.
+    """
     try:
         import torch
     except Exception:
@@ -272,11 +306,21 @@ def pick_device():
 
     if torch.cuda.is_available():
         name = torch.cuda.get_device_name(0)
-        # bfloat16 needs Ampere or newer (compute capability >= 8.0).
-        # The Colab free T4 is 7.5, so it gets float16.
-        dtype = torch.bfloat16 if torch.cuda.get_device_capability(0)[0] >= 8 else torch.float16
         vram = torch.cuda.get_device_properties(0).total_memory / 1e9
-        return "cuda", dtype, f"{name}, {vram:.0f} GB"
+        if _bf16_matmul_works(torch):
+            slow = torch.cuda.get_device_capability(0)[0] < 8
+            note = ", bf16 has no tensor cores here — correct but slower" if slow else ""
+            return "cuda", torch.bfloat16, f"{name}, {vram:.0f} GB{note}"
+        # No usable bfloat16. float32 would be safe but a 4B model needs about
+        # 17 GB of weights in float32 and will not fit. Say so plainly instead
+        # of handing back float16 and producing nan losses in Demo 2.
+        msg = (f"{name} cannot run bfloat16, and MedGemma produces nan losses "
+               "in float16 (its activations reach about 280,000; float16 stops "
+               "at 65,504). Use a runtime with an Ampere or newer GPU — on "
+               "Colab, Runtime > Change runtime type > L4 or A100.")
+        if strict:
+            raise RuntimeError(msg)
+        return "cuda", torch.float32, f"{name}, {vram:.0f} GB — NO BFLOAT16: {msg}"
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         return "mps", torch.bfloat16, "Apple Silicon (MPS)"
     return "cpu", torch.float32, "CPU only"
@@ -333,12 +377,15 @@ def setup(
     results = data_dir / "results"
 
     # device
-    device, dtype, gpu_name = pick_device()
+    device, dtype, gpu_name = pick_device(strict=bool(need_gpu))
+    dt = str(dtype).replace("torch.", "") if dtype else "n/a"
     if need_gpu and device == "cpu":
         _line(_WARN, "device", "CPU — training will be unusably slow. "
                                "Colab: Runtime > Change runtime type > T4 GPU")
+    elif "NO BFLOAT16" in gpu_name:
+        _line(_WARN, "device", gpu_name)
     else:
-        _line(_OK, "device", f"{device} ({gpu_name})")
+        _line(_OK, "device", f"{device}, {dt} ({gpu_name})")
 
     # token + gating
     token, model_id, is_fallback = None, MEDGEMMA_ID, False
